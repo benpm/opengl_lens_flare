@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake:*)",
+      "Bash(vcpkg:*)",
+      "Bash(where vcpkg)",
+      "Bash(grep:*)",
+      "Bash(./opengl_lens_flare.exe)",
+      "Bash(timeout:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "C:\\Users\\ben\\Documents\\vcpkg\\installed\\x64-windows\\share"
+    ]
+  }
+}
