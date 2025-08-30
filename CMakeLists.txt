@@ -6,8 +6,8 @@ project(opengl_lens_flare
     LANGUAGES CXX
 )
 
-# Set C++17 standard
-set(CMAKE_CXX_STANDARD 17)
+# Set C++20 standard
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Build options
@@ -20,13 +20,20 @@ find_package(OpenGL REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
 # Add GLFW as subdirectory
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_DOCS p,sm CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/glfw)
 
-# Dependency: glad
-add_library(glad external/glad/glad/src/gl.c)
-target_include_directories(glad PUBLIC external/glad/glad/include)
+# Add GLAD library
+add_library(glad STATIC
+    external/glad/glad/src/gl.c
+)
+target_include_directories(glad PUBLIC
+    external/glad/glad/include
+)
 
-# Create main executable
 add_executable(${PROJECT_NAME}
     opengl_lens_flare.cpp
 )

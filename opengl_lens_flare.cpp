@@ -12,15 +12,47 @@
 #include <cmath>
 #include <cassert>
 
-// OpenGL error checking macro
-#define CHECK_GL_ERROR() \
-    do { \
-        GLenum err = glGetError(); \
-        if (err != GL_NO_ERROR) { \
-            std::cerr << "OpenGL error " << err << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-            assert(false); \
-        } \
-    } while (0)
+// GLAD post-callback error handler
+void APIENTRY gladPostCallback(void *ret, const char *name, GLADapiproc apiproc, int len_args, ...) {
+    GLenum error_code = glad_glGetError();
+    
+    if (error_code != GL_NO_ERROR) {
+        const char* error_string;
+        switch (error_code) {
+            case GL_INVALID_ENUM:
+                error_string = "GL_INVALID_ENUM";
+                break;
+            case GL_INVALID_VALUE:
+                error_string = "GL_INVALID_VALUE";
+                break;
+            case GL_INVALID_OPERATION:
+                error_string = "GL_INVALID_OPERATION";
+                break;
+            case GL_STACK_OVERFLOW:
+                error_string = "GL_STACK_OVERFLOW";
+                break;
+            case GL_STACK_UNDERFLOW:
+                error_string = "GL_STACK_UNDERFLOW";
+                break;
+            case GL_OUT_OF_MEMORY:
+                error_string = "GL_OUT_OF_MEMORY";
+                break;
+            case GL_INVALID_FRAMEBUFFER_OPERATION:
+                error_string = "GL_INVALID_FRAMEBUFFER_OPERATION";
+                break;
+            default:
+                error_string = "UNKNOWN_ERROR";
+                break;
+        }
+        
+        std::cerr << "OpenGL error in " << name << ": " << error_string << " (0x" << std::hex << error_code << std::dec << ")" << std::endl;
+        
+        // Don't assert in release builds to avoid crashing, but still report the error
+        #ifdef _DEBUG
+        assert(false);
+        #endif
+    }
+}
 
 // Constants
 #define PI 3.14159265359f
@@ -81,6 +113,7 @@ private:
     // OpenGL resources
     GLuint program_lens_flare_compute;
     GLuint program_lens_flare;
+    GLuint program_ghost_render;
     GLuint program_aperture;
     GLuint program_starburst;
     GLuint program_tonemap;
@@ -109,6 +142,7 @@ private:
     GLuint vao_quad;
     GLuint vbo_quad;
     GLuint ebo_quad;
+    GLuint vao_ghost; // Dummy VAO for ghost rendering
     
     // Lens system data
     std::vector<LensInterface> lens_interfaces;
@@ -245,19 +279,18 @@ private:
             throw std::runtime_error("Failed to initialize GLAD");
         }
         
+        // Set up GLAD post-callback for automatic error checking
+        gladSetGLPostCallback(gladPostCallback);
+        
         std::cout << "  OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
         std::cout << "  OpenGL Vendor: " << glGetString(GL_VENDOR) << std::endl;
         std::cout << "  OpenGL Renderer: " << glGetString(GL_RENDERER) << std::endl;
-        CHECK_GL_ERROR();
         
         // Enable required OpenGL features
         std::cout << "  Enabling OpenGL features..." << std::endl;
         glEnable(GL_BLEND);
-        CHECK_GL_ERROR();
         glBlendFunc(GL_SRC_ALPHA, GL_ONE); // Additive blending for lens flare
-        CHECK_GL_ERROR();
         glEnable(GL_DEPTH_TEST);
-        CHECK_GL_ERROR();
         
         // Create fullscreen quad
         std::cout << "  Creating fullscreen quad..." << std::endl;
@@ -275,95 +308,67 @@ private:
         
         std::cout << "  Generating vertex arrays and buffers..." << std::endl;
         glGenVertexArrays(1, &vao_quad);
-        CHECK_GL_ERROR();
+        glGenVertexArrays(1, &vao_ghost); // Dummy VAO for ghost rendering
         glGenBuffers(1, &vbo_quad);
-        CHECK_GL_ERROR();
         glGenBuffers(1, &ebo_quad);
-        CHECK_GL_ERROR();
         glGenBuffers(1, &ubo_globals);  // Generate UBO first!
-        CHECK_GL_ERROR();
         
         std::cout << "  Setting up vertex array..." << std::endl;
         glBindVertexArray(vao_quad);
-        CHECK_GL_ERROR();
         
         // Setup VBO
         glBindBuffer(GL_ARRAY_BUFFER, vbo_quad);
-        CHECK_GL_ERROR();
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), quad_vertices, GL_STATIC_DRAW);
-        CHECK_GL_ERROR();
         
         // Setup EBO
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_quad);
-        CHECK_GL_ERROR();
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_indices), quad_indices, GL_STATIC_DRAW);
-        CHECK_GL_ERROR();
         
         // Setup vertex attributes
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-        CHECK_GL_ERROR();
         glEnableVertexAttribArray(0);
-        CHECK_GL_ERROR();
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-        CHECK_GL_ERROR();
         glEnableVertexAttribArray(1);
-        CHECK_GL_ERROR();
         
         std::cout << "  Setting up uniform buffer..." << std::endl;
         glBindBuffer(GL_UNIFORM_BUFFER, ubo_globals);
-        CHECK_GL_ERROR();
         glBufferData(GL_UNIFORM_BUFFER, sizeof(GlobalUniforms), nullptr, GL_DYNAMIC_DRAW);
-        CHECK_GL_ERROR();
         glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_globals);
-        CHECK_GL_ERROR();
         
         std::cout << "  Creating SSBO for lens interfaces (size: " << lens_interfaces.size() << ")..." << std::endl;
         glGenBuffers(1, &ssbo_lens_interfaces);
-        CHECK_GL_ERROR();
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_lens_interfaces);
-        CHECK_GL_ERROR();
         if (!lens_interfaces.empty()) {
             glBufferData(GL_SHADER_STORAGE_BUFFER, lens_interfaces.size() * sizeof(LensInterface), lens_interfaces.data(), GL_STATIC_DRAW);
-            CHECK_GL_ERROR();
-        }
+            }
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo_lens_interfaces);
-        CHECK_GL_ERROR();
         
         std::cout << "  Creating SSBO for ghost data (size: " << ghost_data.size() << ")..." << std::endl;
         glGenBuffers(1, &ssbo_ghost_data);
-        CHECK_GL_ERROR();
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_ghost_data);
-        CHECK_GL_ERROR();
         if (!ghost_data.empty()) {
             glBufferData(GL_SHADER_STORAGE_BUFFER, ghost_data.size() * sizeof(GhostData), ghost_data.data(), GL_STATIC_DRAW);
-            CHECK_GL_ERROR();
-        }
+            }
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_ghost_data);
-        CHECK_GL_ERROR();
         
         std::cout << "  Creating SSBO for vertex data (vertices: " << num_ghosts * patch_tessellation * patch_tessellation << ")..." << std::endl;
         int total_vertices = num_ghosts * patch_tessellation * patch_tessellation;
         glGenBuffers(1, &ssbo_vertex_data);
-        CHECK_GL_ERROR();
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_vertex_data);
-        CHECK_GL_ERROR();
         if (total_vertices > 0) {
             glBufferData(GL_SHADER_STORAGE_BUFFER, total_vertices * 4 * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
-            CHECK_GL_ERROR();
-        }
+            }
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_vertex_data);
-        CHECK_GL_ERROR();
         
         std::cout << "  Unbinding buffers..." << std::endl;
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        CHECK_GL_ERROR();
         glBindVertexArray(0);
-        CHECK_GL_ERROR();
         
         std::cout << "  OpenGL setup complete!" << std::endl;
     }
     
     void renderAperture() {
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Render Aperture");
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_aperture);
         glViewport(0, 0, aperture_resolution, aperture_resolution);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -381,9 +386,11 @@ private:
         glBindVertexArray(0);
         
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glPopDebugGroup();
     }
     
     void generateStarburst() {
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Generate Starburst");
         // For this simplified version, we'll skip the FFT implementation
         // and use a procedural starburst instead
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_starburst);
@@ -406,31 +413,89 @@ private:
         glBindVertexArray(0);
         
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glPopDebugGroup();
     }
     
     void renderLensFlare() {
-        // Bind HDR framebuffer for rendering
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Render Lens Flare");
+        // Step 1: Run compute shader to trace rays through lens system
+        glUseProgram(program_lens_flare_compute);
+        
+        // Bind uniform buffer
+        glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_globals);
+        
+        // Bind storage buffers
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo_lens_interfaces);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_ghost_data);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_vertex_data);
+        
+        // Bind aperture texture
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texture_aperture);
+        glUniform1i(glGetUniformLocation(program_lens_flare_compute, "aperture_texture"), 0);
+        
+        // Dispatch compute shader
+        int groups_x = (patch_tessellation + 15) / 16;
+        int groups_y = (patch_tessellation + 15) / 16;
+        glDispatchCompute(num_ghosts * groups_x, groups_y, 1);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        
+        // Step 2: Render the ray-traced results as ghost triangles
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr);
         glViewport(0, 0, 1920, 1080);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         
-        // Render lens flare effect using simplified shader
-        glUseProgram(program_lens_flare);
+        // Enable additive blending for lens flare accumulation
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         
-        // Set uniforms
-        glUniform1f(glGetUniformLocation(program_lens_flare, "time"), globals.time);
-        glUniform3fv(glGetUniformLocation(program_lens_flare, "light_dir"), 1, glm::value_ptr(globals.light_dir));
-        glUniform2fv(glGetUniformLocation(program_lens_flare, "backbuffer_size"), 1, glm::value_ptr(globals.backbuffer_size));
+        // Use ghost rendering program
+        glUseProgram(program_ghost_render);
         
-        // Render fullscreen quad with lens flare effect
-        glBindVertexArray(vao_quad);
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-        glBindVertexArray(0);
+        // Set common uniforms
+        glUniform1i(glGetUniformLocation(program_ghost_render, "patch_tessellation"), patch_tessellation);
+        glUniform1f(glGetUniformLocation(program_ghost_render, "time"), globals.time);
         
+        // Bind aperture texture
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texture_aperture);
+        glUniform1i(glGetUniformLocation(program_ghost_render, "aperture_texture"), 0);
+        
+        // Bind the SSBO as input for vertex shader
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_vertex_data);
+        
+        // Bind dummy VAO for ghost rendering
+        glBindVertexArray(vao_ghost);
+        
+        // Render each ghost
+        int quads_per_ghost = (patch_tessellation - 1) * (patch_tessellation - 1);
+        int vertices_per_ghost = quads_per_ghost * 6; // 6 vertices per quad (2 triangles)
+        
+        for (int ghost_id = 0; ghost_id < num_ghosts && ghost_id < 10; ++ghost_id) { // Limit to first 10 ghosts for performance
+            // Set ghost-specific uniforms
+            glUniform1f(glGetUniformLocation(program_ghost_render, "ghost_id"), static_cast<float>(ghost_id));
+            
+            // Set ghost color based on ghost ID (simple variation)
+            float hue = (ghost_id * 0.137f); // Golden ratio for good color distribution
+            glm::vec3 ghost_color = glm::vec3(
+                0.5f + 0.5f * std::sin(hue * 2.0f * PI),
+                0.5f + 0.5f * std::sin((hue + 0.33f) * 2.0f * PI),
+                0.5f + 0.5f * std::sin((hue + 0.66f) * 2.0f * PI)
+            );
+            glUniform3fv(glGetUniformLocation(program_ghost_render, "ghost_color"), 1, glm::value_ptr(ghost_color));
+            
+            // Render triangles - vertex shader will generate the geometry from compute results
+            glDrawArrays(GL_TRIANGLES, 0, vertices_per_ghost);
+        }
+        
+        glBindVertexArray(0); // Unbind VAO
+        glDisable(GL_BLEND);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glPopDebugGroup();
     }
     
     void tonemap() {
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Tonemap");
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, 1920, 1080);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -444,6 +509,7 @@ private:
         glBindVertexArray(vao_quad);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         glBindVertexArray(0);
+        glPopDebugGroup();
     }
     
     void updateUniforms(float time, const glm::vec3& light_direction) {
@@ -545,6 +611,7 @@ private:
         // Clean up OpenGL resources
         glDeleteProgram(program_lens_flare_compute);
         glDeleteProgram(program_lens_flare);
+        glDeleteProgram(program_ghost_render);
         glDeleteProgram(program_aperture);
         glDeleteProgram(program_starburst);
         glDeleteProgram(program_tonemap);
@@ -564,6 +631,7 @@ private:
         glDeleteBuffers(1, &ubo_globals);
         
         glDeleteVertexArrays(1, &vao_quad);
+        glDeleteVertexArrays(1, &vao_ghost);
         glDeleteBuffers(1, &vbo_quad);
         glDeleteBuffers(1, &ebo_quad);
     }
@@ -572,6 +640,8 @@ private:
         // Load shaders from files
         std::string lens_compute_source = loadShaderFromFile("shaders/lens_flare_compute.glsl");
         std::string lens_flare_fragment_source = loadShaderFromFile("shaders/lens_flare.glsl");
+        std::string ghost_render_vertex_source = loadShaderFromFile("shaders/ghost_render_vertex.glsl");
+        std::string ghost_render_fragment_source = loadShaderFromFile("shaders/ghost_render_fragment.glsl");
         std::string aperture_fragment_source = loadShaderFromFile("shaders/aperture.glsl");
         std::string tonemap_fragment_source = loadShaderFromFile("shaders/tonemap.glsl");
         std::string starburst_fragment_source = loadShaderFromFile("shaders/starburst.glsl");
@@ -579,6 +649,7 @@ private:
         // Create and compile shaders
         program_lens_flare_compute = createComputeProgram(lens_compute_source);
         program_lens_flare = createShaderProgram(getVertexShaderSource(), lens_flare_fragment_source);
+        program_ghost_render = createShaderProgram(ghost_render_vertex_source, ghost_render_fragment_source);
         program_aperture = createShaderProgram(getVertexShaderSource(), aperture_fragment_source);
         program_tonemap = createShaderProgram(getVertexShaderSource(), tonemap_fragment_source);
         program_starburst = createShaderProgram(getVertexShaderSource(), starburst_fragment_source);
