@@ -45,7 +45,7 @@ struct LensInterface {
     glm::vec3 n;        // n.x = left IOR, n.y = coating IOR, n.z = right IOR
     float sa;           // surface aperture
     float d1;           // coating thickness
-    float flat;         // flat surface flag
+    float is_flat;      // flat surface flag (renamed to avoid GLSL keyword conflict)
     float pos;          // position along optical axis
     float w;            // width factor
 };
@@ -79,6 +79,7 @@ struct GlobalUniforms {
 class LensFlareRenderer {
 private:
     // OpenGL resources
+    GLuint program_lens_flare_compute;
     GLuint program_lens_flare;
     GLuint program_aperture;
     GLuint program_starburst;
@@ -214,7 +215,7 @@ private:
             
             interface.sa = entry.h;
             interface.d1 = entry.c;
-            interface.flat = entry.f ? 1.0f : 0.0f;
+            interface.is_flat = entry.f ? 1.0f : 0.0f;
             interface.pos = total_distance;
             interface.w = entry.w;
             
@@ -389,43 +390,42 @@ private:
         glViewport(0, 0, starburst_resolution, starburst_resolution);
         glClear(GL_COLOR_BUFFER_BIT);
         
-        // Simple procedural starburst would go here
-        // In a full implementation, this would involve FFT processing of the aperture
+        // Use starburst shader to generate procedural effect
+        glUseProgram(program_starburst);
+        glUniform1f(glGetUniformLocation(program_starburst, "time"), globals.time);
+        glUniform3fv(glGetUniformLocation(program_starburst, "light_dir"), 1, glm::value_ptr(globals.light_dir));
+        glUniform2fv(glGetUniformLocation(program_starburst, "backbuffer_size"), 1, glm::value_ptr(glm::vec2(starburst_resolution)));
+        
+        // Bind a dummy texture (we'll use texture unit 1 to avoid conflicts)
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, texture_starburst); // Self-reference is okay for this simple case
+        glUniform1i(glGetUniformLocation(program_starburst, "starburst_texture"), 1);
+        
+        glBindVertexArray(vao_quad);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
         
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
     
     void renderLensFlare() {
-        // Update global uniforms
-        glBindBuffer(GL_UNIFORM_BUFFER, ubo_globals);
-        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(GlobalUniforms), &globals);
-        
-        // Run compute shader to trace rays
-        glUseProgram(program_lens_flare);
-        
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo_lens_interfaces);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_ghost_data);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_vertex_data);
-        
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, texture_aperture);
-        glUniform1i(glGetUniformLocation(program_lens_flare, "aperture_texture"), 0);
-        
-        // Dispatch compute shader
-        int groups_x = (patch_tessellation + 15) / 16;
-        int groups_y = (patch_tessellation + 15) / 16;
-        glDispatchCompute(num_ghosts * groups_x, groups_y, 1);
-        
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-        
-        // Render to HDR buffer
+        // Bind HDR framebuffer for rendering
         glBindFramebuffer(GL_FRAMEBUFFER, fbo_hdr);
         glViewport(0, 0, 1920, 1080);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         
-        // Here we would render the traced rays as triangulated patches
-        // For simplicity, this is omitted but would involve creating geometry
-        // from the compute shader results and rendering with additive blending
+        // Render lens flare effect using simplified shader
+        glUseProgram(program_lens_flare);
+        
+        // Set uniforms
+        glUniform1f(glGetUniformLocation(program_lens_flare, "time"), globals.time);
+        glUniform3fv(glGetUniformLocation(program_lens_flare, "light_dir"), 1, glm::value_ptr(globals.light_dir));
+        glUniform2fv(glGetUniformLocation(program_lens_flare, "backbuffer_size"), 1, glm::value_ptr(globals.backbuffer_size));
+        
+        // Render fullscreen quad with lens flare effect
+        glBindVertexArray(vao_quad);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
         
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
@@ -461,20 +461,25 @@ private:
         globals.starburst_resolution = static_cast<float>(starburst_resolution);
     }
     
+    std::string loadShaderFromFile(const std::string& filepath) {
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            std::cerr << "Failed to open shader file: " << filepath << std::endl;
+            return "";
+        }
+        
+        std::string content;
+        std::string line;
+        while (std::getline(file, line)) {
+            content += line + "\n";
+        }
+        file.close();
+        
+        return content;
+    }
+    
     std::string getVertexShaderSource() {
-        return R"(
-#version 330 core
-
-layout (location = 0) in vec2 aPos;
-layout (location = 1) in vec2 aTexCoord;
-
-out vec2 uv;
-
-void main() {
-    gl_Position = vec4(aPos, 0.0, 1.0);
-    uv = aTexCoord;
-}
-)";
+        return loadShaderFromFile("shaders/vertex.glsl");
     }
     
     GLuint createShaderProgram(const std::string& vertexSource, const std::string& fragmentSource) {
@@ -538,6 +543,7 @@ void main() {
     
     void cleanup() {
         // Clean up OpenGL resources
+        glDeleteProgram(program_lens_flare_compute);
         glDeleteProgram(program_lens_flare);
         glDeleteProgram(program_aperture);
         glDeleteProgram(program_starburst);
@@ -563,87 +569,16 @@ void main() {
     }
     
     void createShaders() {
-        // Lens flare compute shader
-        std::string lens_compute_source = R"(
-#version 430
-
-layout(local_size_x = 16, local_size_y = 16) in;
-
-// Simple placeholder compute shader
-void main() {
-    // Minimal implementation for now
-}
-)";
-        
-        // Aperture fragment shader
-        std::string aperture_fragment_source = R"(
-#version 330 core
-
-in vec2 uv;
-out vec4 fragColor;
-
-uniform float aperture_opening;
-uniform float number_of_blades;
-uniform float time;
-
-void main() {
-    vec2 ndc = (uv - 0.5) * 2.0;
-    float dist = length(ndc);
-    
-    // Simple circular aperture
-    float aperture_mask = smoothstep(0.8, 0.7, dist);
-    
-    vec3 rgb = vec3(aperture_mask);
-    fragColor = vec4(rgb, 1.0);
-}
-)";
-        
-        // Simple tonemap shader
-        std::string tonemap_fragment_source = R"(
-#version 330 core
-
-in vec2 uv;
-out vec4 fragColor;
-
-uniform sampler2D hdr_texture;
-
-vec3 ACESFilm(vec3 x) {
-    float a = 2.51;
-    float b = 0.03;
-    float c = 2.43;
-    float d = 0.59;
-    float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
-
-void main() {
-    vec3 hdr_color = texture(hdr_texture, uv).rgb;
-    vec3 mapped = ACESFilm(hdr_color);
-    fragColor = vec4(mapped, 1.0);
-}
-)";
-        
-        // Simple starburst shader
-        std::string starburst_fragment_source = R"(
-#version 330 core
-
-in vec2 uv;
-out vec4 fragColor;
-
-uniform float time;
-
-void main() {
-    vec2 ndc = (uv - 0.5) * 2.0;
-    float dist = length(ndc);
-    float starburst = max(0.0, 1.0 - dist);
-    
-    vec3 color = vec3(1.0, 0.8, 0.6) * starburst * 0.5;
-    fragColor = vec4(color, 1.0);
-}
-)";
+        // Load shaders from files
+        std::string lens_compute_source = loadShaderFromFile("shaders/lens_flare_compute.glsl");
+        std::string lens_flare_fragment_source = loadShaderFromFile("shaders/lens_flare.glsl");
+        std::string aperture_fragment_source = loadShaderFromFile("shaders/aperture.glsl");
+        std::string tonemap_fragment_source = loadShaderFromFile("shaders/tonemap.glsl");
+        std::string starburst_fragment_source = loadShaderFromFile("shaders/starburst.glsl");
         
         // Create and compile shaders
-        program_lens_flare = createComputeProgram(lens_compute_source);
+        program_lens_flare_compute = createComputeProgram(lens_compute_source);
+        program_lens_flare = createShaderProgram(getVertexShaderSource(), lens_flare_fragment_source);
         program_aperture = createShaderProgram(getVertexShaderSource(), aperture_fragment_source);
         program_tonemap = createShaderProgram(getVertexShaderSource(), tonemap_fragment_source);
         program_starburst = createShaderProgram(getVertexShaderSource(), starburst_fragment_source);
